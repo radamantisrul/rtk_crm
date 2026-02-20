@@ -7,15 +7,18 @@ CRM multi-compañía inspirado en Chatwoot + WispHub, con base para operación I
 - Gestión de clientes con activación/suspensión sincronizable a UISP.
 - Automatizaciones por eventos (ej. cambio de estado) con disparo a webhook de n8n.
 - Modelo de sub-arriendo (reseller): una compañía puede tener compañías hijas.
+- Interfaz web amigable para operaciones básicas en `/`.
 
 ## Ejecutar
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e .[dev]
 uvicorn app.main:app --reload
 ```
+
+Abre `http://localhost:8000` para la interfaz web.
 
 ## Ejecutar tests
 
@@ -25,6 +28,7 @@ pytest
 
 ## Endpoints clave
 
+- `GET /` (UI)
 - `POST /companies`
 - `GET /companies`
 - `POST /companies/{company_id}/integrations`

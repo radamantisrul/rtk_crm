@@ -1,4 +1,7 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from app.schemas import (
     Automation,
@@ -14,8 +17,16 @@ from app.schemas import (
 )
 from app.services import CRMService
 
-app = FastAPI(title="RTK CRM API", version="0.1.0")
+app = FastAPI(title="RTK CRM API", version="0.2.0")
 service = CRMService()
+
+templates = Jinja2Templates(directory="app/templates")
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/", response_class=HTMLResponse)
+def web_app(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(request, "index.html")
 
 
 @app.get("/health")

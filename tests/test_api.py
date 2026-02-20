@@ -6,6 +6,12 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_web_home_available() -> None:
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "RTK CRM" in response.text
+
+
 def test_company_hierarchy_and_listing() -> None:
     parent = client.post(
         "/companies",
