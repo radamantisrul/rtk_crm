@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RTK CRM</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>RTK CRM</h1>
+      <p>CRM multi-compañía con integraciones UISP, n8n, OpenAI y Google.</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>1) Crear compañía</h2>
+        <form id="company-form">
+          <input name="name" placeholder="Nombre de compañía" required minlength="2" />
+          <input name="network_name" placeholder="Red lógica" required minlength="2" />
+          <input name="parent_company_id" placeholder="ID compañía padre (opcional)" />
+          <button type="submit">Crear</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="row">
+          <h2>2) Compañías</h2>
+          <button id="refresh-companies">Actualizar</button>
+        </div>
+        <ul id="companies"></ul>
+      </section>
+
+      <section class="card">
+        <h2>3) Alta cliente</h2>
+        <form id="customer-form">
+          <input name="company_id" placeholder="Company ID" required />
+          <input name="name" placeholder="Nombre cliente" required minlength="2" />
+          <input name="email" placeholder="Email" required />
+          <input name="plan_name" placeholder="Plan (ej. 100Mbps)" required />
+          <button type="submit">Crear cliente</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>4) Suspender/Activar cliente</h2>
+        <form id="status-form">
+          <input name="company_id" placeholder="Company ID" required />
+          <input name="customer_id" placeholder="Customer ID" required />
+          <select name="status">
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+          </select>
+          <input name="reason" placeholder="Razón" />
+          <button type="submit">Actualizar estado</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <h2>5) Dashboard por compañía</h2>
+        <form id="dashboard-form">
+          <input name="company_id" placeholder="Company ID" required />
+          <button type="submit">Ver dashboard</button>
+        </form>
+        <pre id="dashboard-output"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Eventos</h2>
+        <pre id="logs"></pre>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
