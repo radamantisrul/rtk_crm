@@ -4,14 +4,12 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-
 client = TestClient(app)
 
 
-def test_web_home_available() -> None:
-    response = client.get("/")
+def test_health() -> None:
+    response = client.get("/health")
     assert response.status_code == 200
-    assert "RTK CRM" in response.text
 
 
 def test_auth_login_and_me() -> None:
@@ -29,113 +27,55 @@ def test_auth_login_and_me() -> None:
     assert me.status_code == 200
     assert me.json()["username"] == "admin"
 
-    os.environ.pop("RTK_ADMIN_USER", None)
-    os.environ.pop("RTK_ADMIN_PASSWORD", None)
+
+def test_tenant_crud() -> None:
+    missing = client.post("/tenants", json={"name": "Tenant A", "network_name": "red-a"})
+    assert missing.status_code == 400
+
+    create = client.post("/tenants", headers={"X-Tenant-Id": "bootstrap"}, json={"name": "Tenant A", "network_name": "red-a"})
+    assert create.status_code == 200
+    tenant = create.json()
+
+    listing = client.get("/tenants", headers={"X-Tenant-Id": "bootstrap"})
+    assert listing.status_code == 200
+    assert any(item["id"] == tenant["id"] for item in listing.json())
+
+    update = client.put(f"/tenants/{tenant['id']}", headers={"X-Tenant-Id": "bootstrap"}, json={"name": "Tenant A1", "network_name": "red-a1"})
+    assert update.status_code == 200
+    assert update.json()["name"] == "Tenant A1"
+
+    get_one = client.get(f"/tenants/{tenant['id']}", headers={"X-Tenant-Id": "bootstrap"})
+    assert get_one.status_code == 200
 
 
-def test_company_hierarchy_and_listing() -> None:
-    parent = client.post(
-        "/companies",
-        json={"name": "ISP Matriz", "network_name": "core-network"},
+def test_customers_require_tenant_header_and_crud() -> None:
+    tenant = client.post("/tenants", headers={"X-Tenant-Id": "bootstrap"}, json={"name": "Tenant B", "network_name": "red-b"}).json()
+
+    missing_header = client.get("/customers")
+    assert missing_header.status_code == 400
+
+    create = client.post(
+        "/customers",
+        headers={"X-Tenant-Id": tenant["id"]},
+        json={"name": "Cliente Uno", "email": "uno@example.com", "plan_name": "100Mbps", "status": "active"},
     )
-    assert parent.status_code == 200
-    parent_id = parent.json()["id"]
+    assert create.status_code == 200
+    customer = create.json()
 
-    child = client.post(
-        "/companies",
-        json={
-            "name": "ISP Revendedor", "network_name": "reseller-segment", "parent_company_id": parent_id
-        },
+    listing = client.get("/customers", headers={"X-Tenant-Id": tenant["id"]})
+    assert listing.status_code == 200
+    assert any(item["id"] == customer["id"] for item in listing.json())
+
+    get_one = client.get(f"/customers/{customer['id']}", headers={"X-Tenant-Id": tenant["id"]})
+    assert get_one.status_code == 200
+
+    update = client.put(
+        f"/customers/{customer['id']}",
+        headers={"X-Tenant-Id": tenant["id"]},
+        json={"name": "Cliente Uno 2", "email": "uno2@example.com", "plan_name": "200Mbps", "status": "suspended"},
     )
-    assert child.status_code == 200
+    assert update.status_code == 200
+    assert update.json()["status"] == "suspended"
 
-    companies = client.get("/companies")
-    assert companies.status_code == 200
-    assert len(companies.json()) >= 2
-
-
-def test_customer_suspend_syncs_uisp_and_triggers_n8n_automation() -> None:
-    company = client.post(
-        "/companies",
-        json={"name": "ISP Uno", "network_name": "segment-a"},
-    ).json()
-    company_id = company["id"]
-
-    automation = client.post(
-        f"/companies/{company_id}/automations",
-        json={
-            "name": "Suspension Flow",
-            "event": "customer.status_changed",
-            "enabled": True,
-            "target_webhook": "https://n8n.example.com/webhook/suspend",
-        },
-    )
-    assert automation.status_code == 200
-
-    customer = client.post(
-        f"/companies/{company_id}/customers",
-        json={
-            "name": "Cliente Demo",
-            "email": "cliente@example.com",
-            "plan_name": "100Mbps",
-        },
-    ).json()
-
-    response = client.post(
-        f"/companies/{company_id}/customers/{customer['id']}/status",
-        json={"status": "suspended", "reason": "Mora"},
-    )
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["customer"]["status"] == "suspended"
-    assert data["uisp"]["synced"] is True
-    assert len(data["automations"]) == 1
-    assert data["automations"][0]["provider"] == "n8n"
-
-
-def test_dashboard_counts() -> None:
-    company = client.post(
-        "/companies",
-        json={"name": "ISP Dos", "network_name": "segment-b"},
-    ).json()
-    company_id = company["id"]
-
-    integration = client.post(
-        f"/companies/{company_id}/integrations",
-        json={"type": "openai", "config": {"api_key": "sk-***", "model": "gpt-4o-mini"}},
-    )
-    assert integration.status_code == 200
-
-    customer = client.post(
-        f"/companies/{company_id}/customers",
-        json={
-            "name": "Cliente Activo",
-            "email": "activo@example.com",
-            "plan_name": "50Mbps",
-        },
-    ).json()
-
-    suspend = client.post(
-        f"/companies/{company_id}/customers/{customer['id']}/status",
-        json={"status": "suspended", "reason": "Solicitud"},
-    )
-    assert suspend.status_code == 200
-
-    dashboard = client.get(f"/companies/{company_id}/dashboard")
-    assert dashboard.status_code == 200
-    info = dashboard.json()
-    assert info["total_customers"] == 1
-    assert info["suspended_customers"] == 1
-    assert "openai" in info["integrations"]
-
-
-def test_api_key_protection() -> None:
-    os.environ["RTK_API_KEY"] = "secret"
-    unauthorized = client.get("/companies")
-    assert unauthorized.status_code == 401
-
-    authorized = client.get("/companies", headers={"x-api-key": "secret"})
-    assert authorized.status_code == 200
-
-    os.environ.pop("RTK_API_KEY", None)
+    delete = client.delete(f"/customers/{customer['id']}", headers={"X-Tenant-Id": tenant["id"]})
+    assert delete.status_code == 200

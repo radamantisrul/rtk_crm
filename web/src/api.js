@@ -14,6 +14,10 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
+function currentTenantHeader() {
+  return localStorage.getItem('rtk_tenant_id') || 'bootstrap'
+}
+
 export async function request(path, options = {}) {
   const token = getToken()
   const headers = {
@@ -50,4 +54,24 @@ export async function login(username, password) {
 
 export async function getMe() {
   return request('/auth/me')
+}
+
+export async function listTenants() {
+  return request('/tenants', { headers: { 'X-Tenant-Id': currentTenantHeader() } })
+}
+
+export async function createTenant(payload) {
+  return request('/tenants', { method: 'POST', headers: { 'X-Tenant-Id': currentTenantHeader() }, body: JSON.stringify(payload) })
+}
+
+export async function listCustomersByTenant(tenantId) {
+  return request('/customers', { headers: { 'X-Tenant-Id': tenantId } })
+}
+
+export async function createCustomerForTenant(tenantId, payload) {
+  return request('/customers', {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': tenantId },
+    body: JSON.stringify(payload),
+  })
 }

@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { clearToken, getMe, getToken, login, request } from './api'
+import {
+  clearToken,
+  createCustomerForTenant,
+  createTenant,
+  getMe,
+  getToken,
+  listCustomersByTenant,
+  listTenants,
+  login,
+  request,
+} from './api'
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -16,185 +26,142 @@ function Badge({ children, tone = 'neutral' }) {
   return <span className={`badge badge-${tone}`}>{children}</span>
 }
 
-function KpiCard({ title, value, hint }) {
-  return (
-    <article className="kpi-card">
-      <p className="kpi-title">{title}</p>
-      <h3>{value}</h3>
-      <small>{hint}</small>
-    </article>
-  )
-}
-
-function DataTable({ title, columns, rows, searchBy = [], filters = [] }) {
+function DataTable({ title, columns, rows, searchBy = [] }) {
   const [query, setQuery] = useState('')
-  const [activeFilter, setActiveFilter] = useState('all')
-
   const filteredRows = useMemo(() => {
     const q = query.trim().toLowerCase()
-    return rows.filter((row) => {
-      const passText = !q || searchBy.some((key) => String(row[key] ?? '').toLowerCase().includes(q))
-      const passFilter = activeFilter === 'all' || row.status === activeFilter
-      return passText && passFilter
-    })
-  }, [query, rows, searchBy, activeFilter])
+    return rows.filter((row) => !q || searchBy.some((key) => String(row[key] ?? '').toLowerCase().includes(q)))
+  }, [query, rows, searchBy])
 
   return (
     <section className="panel">
       <div className="panel-header">
         <h2>{title}</h2>
-        <div className="actions-inline">
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar..." />
-          {filters.length > 0 && (
-            <select value={activeFilter} onChange={(e) => setActiveFilter(e.target.value)}>
-              <option value="all">Todos</option>
-              {filters.map((filter) => (
-                <option key={filter} value={filter}>
-                  {filter}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
+        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar..." />
       </div>
-
       <div className="table-wrap">
         <table>
           <thead>
-            <tr>
-              {columns.map((col) => (
-                <th key={col.key}>{col.label}</th>
-              ))}
-            </tr>
+            <tr>{columns.map((col) => <th key={col.key}>{col.label}</th>)}</tr>
           </thead>
           <tbody>
             {filteredRows.map((row) => (
-              <tr key={row.id}>
-                {columns.map((col) => (
-                  <td key={col.key}>{col.render ? col.render(row[col.key], row) : row[col.key]}</td>
-                ))}
-              </tr>
+              <tr key={row.id}>{columns.map((col) => <td key={col.key}>{col.render ? col.render(row[col.key], row) : row[col.key]}</td>)}</tr>
             ))}
           </tbody>
         </table>
-        {filteredRows.length === 0 && <p className="empty">Sin resultados.</p>}
       </div>
     </section>
   )
 }
 
-function DashboardPage({ apiStatus, companiesCount }) {
+function DashboardPage({ apiStatus, tenantCount, customerCount }) {
+  const cards = [
+    { title: 'Estado API', value: apiStatus === 'ok' ? 'Online' : 'Offline' },
+    { title: 'Tenants', value: tenantCount },
+    { title: 'Clientes (tenant activo)', value: customerCount },
+  ]
   return (
-    <div className="page-grid">
-      <section className="panel">
-        <h2>Resumen Operativo</h2>
-        <div className="kpi-grid">
-          <KpiCard title="Estado API" value={apiStatus === 'ok' ? 'Online' : 'Offline'} hint="/health" />
-          <KpiCard title="Empresas" value={companiesCount} hint="Tenants registrados" />
-          <KpiCard title="Eventos" value="24" hint="Últimas 24h" />
-          <KpiCard title="Automatizaciones" value="7" hint="Activas" />
-        </div>
-      </section>
-    </div>
+    <section className="panel">
+      <h2>Resumen</h2>
+      <div className="kpi-grid">
+        {cards.map((item) => (
+          <article className="kpi-card" key={item.title}>
+            <p className="kpi-title">{item.title}</p>
+            <h3>{item.value}</h3>
+          </article>
+        ))}
+      </div>
+    </section>
   )
 }
 
-function EmpresasPage({ companies, onCreateCompany }) {
-  const [form, setForm] = useState({ name: '', network_name: '', parent_company_id: '' })
-
-  async function onSubmit(event) {
-    event.preventDefault()
-    await onCreateCompany({ ...form, parent_company_id: form.parent_company_id || null })
-    setForm({ name: '', network_name: '', parent_company_id: '' })
-  }
-
-  const rows = companies.map((item) => ({ ...item, status: item.parent_company_id ? 'reseller' : 'core' }))
-
+function TenantsPage({ tenants, onCreateTenant }) {
+  const [form, setForm] = useState({ name: '', network_name: '' })
   return (
     <div className="page-grid">
       <section className="panel">
-        <h2>Nueva Empresa</h2>
-        <form className="form-grid" onSubmit={onSubmit}>
+        <h2>Crear tenant</h2>
+        <form
+          className="form-grid"
+          onSubmit={async (event) => {
+            event.preventDefault()
+            await onCreateTenant(form)
+            setForm({ name: '', network_name: '' })
+          }}
+        >
           <input required placeholder="Nombre" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input required placeholder="Red lógica" value={form.network_name} onChange={(e) => setForm({ ...form, network_name: e.target.value })} />
-          <input placeholder="Parent Company ID (opcional)" value={form.parent_company_id} onChange={(e) => setForm({ ...form, parent_company_id: e.target.value })} />
-          <button type="submit">Crear empresa</button>
+          <button type="submit">Crear</button>
         </form>
       </section>
-
       <DataTable
-        title="Empresas"
-        rows={rows}
-        searchBy={['name', 'id', 'network_name']}
-        filters={['core', 'reseller']}
+        title="Tenants"
+        rows={tenants}
+        searchBy={['id', 'name', 'network_name']}
         columns={[
           { key: 'name', label: 'Nombre' },
-          { key: 'id', label: 'ID' },
           { key: 'network_name', label: 'Red' },
-          { key: 'status', label: 'Tipo', render: (value) => <Badge tone={value === 'core' ? 'success' : 'warning'}>{value}</Badge> },
+          { key: 'id', label: 'ID' },
         ]}
       />
     </div>
   )
 }
 
-function ClientesPage({ companies, onCreateCustomer }) {
-  const [form, setForm] = useState({ company_id: '', name: '', email: '', plan_name: '' })
-
-  async function onSubmit(event) {
-    event.preventDefault()
-    await onCreateCustomer(form)
-    setForm({ company_id: '', name: '', email: '', plan_name: '' })
-  }
-
+function CustomersPage({ tenants, selectedTenantId, onTenantChange, customers, onCreateCustomer }) {
+  const [form, setForm] = useState({ name: '', email: '', plan_name: '', status: 'active' })
   return (
     <div className="page-grid">
       <section className="panel">
-        <h2>Alta de Cliente</h2>
-        <form className="form-grid" onSubmit={onSubmit}>
-          <select required value={form.company_id} onChange={(e) => setForm({ ...form, company_id: e.target.value })}>
-            <option value="">Seleccionar empresa</option>
-            {companies.map((company) => (
-              <option key={company.id} value={company.id}>{company.name}</option>
-            ))}
-          </select>
-          <input required placeholder="Nombre cliente" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <h2>Clientes por tenant</h2>
+        <select value={selectedTenantId} onChange={(e) => onTenantChange(e.target.value)}>
+          <option value="">Selecciona tenant</option>
+          {tenants.map((tenant) => (
+            <option key={tenant.id} value={tenant.id}>{tenant.name}</option>
+          ))}
+        </select>
+        <form
+          className="form-grid"
+          onSubmit={async (event) => {
+            event.preventDefault()
+            await onCreateCustomer(form)
+            setForm({ name: '', email: '', plan_name: '', status: 'active' })
+          }}
+        >
+          <input required placeholder="Nombre" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
           <input required type="email" placeholder="Email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
-          <input required placeholder="Plan (ej: 100Mbps)" value={form.plan_name} onChange={(e) => setForm({ ...form, plan_name: e.target.value })} />
-          <button type="submit">Crear cliente</button>
+          <input required placeholder="Plan" value={form.plan_name} onChange={(e) => setForm({ ...form, plan_name: e.target.value })} />
+          <select value={form.status} onChange={(e) => setForm({ ...form, status: e.target.value })}>
+            <option value="active">active</option>
+            <option value="suspended">suspended</option>
+          </select>
+          <button type="submit" disabled={!selectedTenantId}>Crear cliente</button>
         </form>
       </section>
-    </div>
-  )
-}
 
-function PlaceholderPage({ title, description, status = 'planned' }) {
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <h2>{title}</h2>
-        <Badge tone={status === 'active' ? 'success' : 'neutral'}>{status}</Badge>
-      </div>
-      <p>{description}</p>
-    </section>
+      <DataTable
+        title="Listado de clientes"
+        rows={customers}
+        searchBy={['name', 'email', 'plan_name', 'status']}
+        columns={[
+          { key: 'name', label: 'Nombre' },
+          { key: 'email', label: 'Email' },
+          { key: 'plan_name', label: 'Plan' },
+          { key: 'status', label: 'Estado', render: (v) => <Badge tone={v === 'active' ? 'success' : 'warning'}>{v}</Badge> },
+        ]}
+      />
+    </div>
   )
 }
 
 function LoginPage({ onSubmit, loading, error }) {
   const [credentials, setCredentials] = useState({ username: '', password: '' })
-
   return (
     <div className="login-screen">
       <section className="login-card">
         <h1>RTK CRM</h1>
-        <p>Login admin inicial.</p>
-        <form
-          className="form-grid"
-          onSubmit={(event) => {
-            event.preventDefault()
-            onSubmit(credentials)
-          }}
-        >
+        <form className="form-grid" onSubmit={(e) => { e.preventDefault(); onSubmit(credentials) }}>
           <input placeholder="Usuario" required value={credentials.username} onChange={(e) => setCredentials({ ...credentials, username: e.target.value })} />
           <input placeholder="Contraseña" type="password" required value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} />
           <button type="submit" disabled={loading}>{loading ? 'Ingresando...' : 'Entrar'}</button>
@@ -205,28 +172,29 @@ function LoginPage({ onSubmit, loading, error }) {
   )
 }
 
-function ProtectedLayout({ isAuthenticated, onLogout, apiStatus, children }) {
+function PlaceholderPage({ title }) {
+  return <section className="panel"><h2>{title}</h2><p>Módulo en construcción.</p></section>
+}
+
+function ProtectedLayout({ isAuthenticated, apiStatus, onLogout, tenants, selectedTenantId, onTenantChange, children }) {
   const location = useLocation()
   if (!isAuthenticated) return <Navigate to="/login" replace />
 
   return (
     <div className="layout">
       <aside className="sidebar">
-        <div>
-          <h1>RTK CRM</h1>
-          <p>Network Operations</p>
-        </div>
-        <nav>
-          {NAV_ITEMS.map((item) => (
-            <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>{item.label}</NavLink>
-          ))}
-        </nav>
+        <div><h1>RTK CRM</h1><p>Multi-tenant basic</p></div>
+        <nav>{NAV_ITEMS.map((item) => <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>{item.label}</NavLink>)}</nav>
       </aside>
       <section className="main">
         <header className="topbar">
           <strong>{NAV_ITEMS.find((item) => location.pathname.startsWith(item.to))?.label || 'Panel'}</strong>
           <div className="actions-inline">
-            <Badge tone={apiStatus === 'ok' ? 'success' : 'danger'}>{apiStatus === 'ok' ? 'API Online' : 'API Offline'}</Badge>
+            <select value={selectedTenantId} onChange={(e) => onTenantChange(e.target.value)}>
+              <option value="">Tenant</option>
+              {tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}
+            </select>
+            <Badge tone={apiStatus === 'ok' ? 'success' : 'danger'}>{apiStatus}</Badge>
             <button className="ghost" onClick={onLogout}>Salir</button>
           </div>
         </header>
@@ -241,10 +209,11 @@ export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false)
   const [authLoading, setAuthLoading] = useState(false)
   const [authError, setAuthError] = useState('')
-  const [apiStatus, setApiStatus] = useState('loading')
-  const [companies, setCompanies] = useState([])
-  const [isLoadingCompanies, setIsLoadingCompanies] = useState(true)
   const [error, setError] = useState('')
+  const [apiStatus, setApiStatus] = useState('loading')
+  const [tenants, setTenants] = useState([])
+  const [selectedTenantId, setSelectedTenantId] = useState(localStorage.getItem('rtk_tenant_id') || '')
+  const [customers, setCustomers] = useState([])
 
   async function loadHealth() {
     try {
@@ -255,40 +224,46 @@ export default function App() {
     }
   }
 
-  async function validateSession() {
-    const token = getToken()
-    if (!token) return
-    try {
-      await getMe()
-      setIsAuthenticated(true)
-      navigate('/dashboard')
-    } catch {
-      clearToken()
-      setIsAuthenticated(false)
+  async function loadTenants() {
+    const data = await listTenants()
+    setTenants(data)
+    if (!selectedTenantId && data.length > 0) {
+      setSelectedTenantId(data[0].id)
+      localStorage.setItem('rtk_tenant_id', data[0].id)
     }
   }
 
-  async function loadCompanies() {
-    setIsLoadingCompanies(true)
-    setError('')
-    try {
-      const data = await request('/companies')
-      setCompanies(data)
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setIsLoadingCompanies(false)
+  async function loadCustomers(tenantId) {
+    if (!tenantId) {
+      setCustomers([])
+      return
     }
+    const data = await listCustomersByTenant(tenantId)
+    setCustomers(data)
   }
 
   useEffect(() => {
     loadHealth()
-    validateSession()
   }, [])
 
   useEffect(() => {
-    if (isAuthenticated) loadCompanies()
-  }, [isAuthenticated])
+    const run = async () => {
+      const token = getToken()
+      if (!token) return
+      try {
+        await getMe()
+        setIsAuthenticated(true)
+        await loadTenants()
+      } catch {
+        clearToken()
+      }
+    }
+    run()
+  }, [])
+
+  useEffect(() => {
+    if (isAuthenticated) loadCustomers(selectedTenantId)
+  }, [selectedTenantId, isAuthenticated])
 
   async function handleLogin(credentials) {
     setAuthLoading(true)
@@ -297,6 +272,7 @@ export default function App() {
       await login(credentials.username, credentials.password)
       await getMe()
       setIsAuthenticated(true)
+      await loadTenants()
       navigate('/dashboard')
     } catch (err) {
       setAuthError(err.message)
@@ -305,32 +281,35 @@ export default function App() {
     }
   }
 
+  async function handleCreateTenant(payload) {
+    setError('')
+    try {
+      await createTenant(payload)
+      await loadTenants()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  async function handleCreateCustomer(payload) {
+    setError('')
+    try {
+      await createCustomerForTenant(selectedTenantId, payload)
+      await loadCustomers(selectedTenantId)
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  function handleTenantChange(tenantId) {
+    setSelectedTenantId(tenantId)
+    localStorage.setItem('rtk_tenant_id', tenantId)
+  }
+
   function logout() {
     clearToken()
     setIsAuthenticated(false)
     navigate('/login')
-  }
-
-  async function createCompany(payload) {
-    setError('')
-    try {
-      await request('/companies', { method: 'POST', body: JSON.stringify(payload) })
-      await loadCompanies()
-    } catch (err) {
-      setError(err.message)
-    }
-  }
-
-  async function createCustomer(payload) {
-    setError('')
-    try {
-      await request(`/companies/${payload.company_id}/customers`, {
-        method: 'POST',
-        body: JSON.stringify({ name: payload.name, email: payload.email, plan_name: payload.plan_name }),
-      })
-    } catch (err) {
-      setError(err.message)
-    }
   }
 
   return (
@@ -340,21 +319,27 @@ export default function App() {
         <Route path="/login" element={<LoginPage onSubmit={handleLogin} loading={authLoading} error={authError} />} />
         <Route
           path="/*"
-          element={(
-            <ProtectedLayout isAuthenticated={isAuthenticated} onLogout={logout} apiStatus={apiStatus}>
-              {isLoadingCompanies && <p className="loading">Cargando datos...</p>}
+          element={
+            <ProtectedLayout
+              isAuthenticated={isAuthenticated}
+              apiStatus={apiStatus}
+              onLogout={logout}
+              tenants={tenants}
+              selectedTenantId={selectedTenantId}
+              onTenantChange={handleTenantChange}
+            >
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
-                <Route path="/dashboard" element={<DashboardPage apiStatus={apiStatus} companiesCount={companies.length} />} />
-                <Route path="/empresas" element={<EmpresasPage companies={companies} onCreateCompany={createCompany} />} />
-                <Route path="/clientes" element={<ClientesPage companies={companies} onCreateCustomer={createCustomer} />} />
-                <Route path="/integraciones" element={<PlaceholderPage title="Integraciones" description="Conexiones por empresa: UISP, OpenAI, n8n y Google." status="active" />} />
-                <Route path="/monitoreo" element={<PlaceholderPage title="Monitoreo" description="Vista para métricas y alertas operativas." />} />
-                <Route path="/comunicaciones" element={<PlaceholderPage title="Comunicaciones" description="Consola tipo inbox omnicanal." />} />
-                <Route path="/configuracion" element={<PlaceholderPage title="Configuración" description="Parámetros generales y claves API." />} />
+                <Route path="/dashboard" element={<DashboardPage apiStatus={apiStatus} tenantCount={tenants.length} customerCount={customers.length} />} />
+                <Route path="/empresas" element={<TenantsPage tenants={tenants} onCreateTenant={handleCreateTenant} />} />
+                <Route path="/clientes" element={<CustomersPage tenants={tenants} selectedTenantId={selectedTenantId} onTenantChange={handleTenantChange} customers={customers} onCreateCustomer={handleCreateCustomer} />} />
+                <Route path="/integraciones" element={<PlaceholderPage title="Integraciones" />} />
+                <Route path="/monitoreo" element={<PlaceholderPage title="Monitoreo" />} />
+                <Route path="/comunicaciones" element={<PlaceholderPage title="Comunicaciones" />} />
+                <Route path="/configuracion" element={<PlaceholderPage title="Configuración" />} />
               </Routes>
             </ProtectedLayout>
-          )}
+          }
         />
       </Routes>
     </>

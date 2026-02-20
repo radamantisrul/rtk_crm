@@ -4,32 +4,24 @@ import hmac
 import json
 import os
 import time
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app.schemas import (
-    Automation,
-    AutomationCreate,
-    Company,
-    CompanyCreate,
-    Customer,
-    CustomerCreate,
-    CustomerStatusChange,
-    Dashboard,
-    Integration,
-    IntegrationCreate,
-)
-from app.services import CRMService
+from app.db import Base, SessionLocal, engine
+from app.models import Customer, Tenant
+from app.schemas import CustomerCreate, CustomerOut, CustomerUpdate, TenantCreate, TenantOut, TenantUpdate
 
-app = FastAPI(title="RTK CRM API", version="0.4.0")
-service = CRMService()
+app = FastAPI(title="RTK CRM API", version="0.5.0")
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+Base.metadata.create_all(bind=engine)
 
 
 class LoginPayload(BaseModel):
@@ -47,7 +39,7 @@ class AuthMeResponse(BaseModel):
 
 
 def _token_secret() -> str:
-    return os.getenv("RTK_AUTH_SECRET", "change-me-in-production")
+    return os.getenv("JWT_SECRET") or os.getenv("RTK_AUTH_SECRET", "change-me-in-production")
 
 
 def _token_ttl_seconds() -> int:
@@ -87,10 +79,18 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return authorization.split(" ", 1)[1].strip()
 
 
-def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
-    expected_api_key = os.getenv("RTK_API_KEY")
-    if expected_api_key and x_api_key != expected_api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+def get_db() -> Session:
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def require_tenant_id(x_tenant_id: str | None = Header(default=None)) -> str:
+    if not x_tenant_id:
+        raise HTTPException(status_code=400, detail="X-Tenant-Id header required")
+    return x_tenant_id
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -129,57 +129,124 @@ def auth_me(authorization: str | None = Header(default=None)) -> AuthMeResponse:
     return AuthMeResponse(username=username)
 
 
-@app.post("/companies", response_model=Company, dependencies=[Depends(require_api_key)])
-def create_company(payload: CompanyCreate) -> Company:
-    try:
-        return service.create_company(payload)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+# Tenants CRUD
+@app.post("/tenants", response_model=TenantOut)
+def create_tenant(payload: TenantCreate, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Tenant:
+    tenant = Tenant(id=str(uuid4()), name=payload.name, network_name=payload.network_name)
+    db.add(tenant)
+    db.commit()
+    db.refresh(tenant)
+    return tenant
 
 
-@app.get("/companies", response_model=list[Company], dependencies=[Depends(require_api_key)])
-def list_companies() -> list[Company]:
-    return service.list_companies()
+@app.get("/tenants", response_model=list[TenantOut])
+def list_tenants(tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> list[Tenant]:
+    return db.query(Tenant).order_by(Tenant.name.asc()).all()
 
 
-@app.post("/companies/{company_id}/integrations", response_model=Integration, dependencies=[Depends(require_api_key)])
-def create_integration(company_id: str, payload: IntegrationCreate) -> Integration:
-    try:
-        return service.create_integration(company_id, payload)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+@app.get("/tenants/{tenant_id}", response_model=TenantOut)
+def get_tenant(tenant_id: str, x_tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Tenant:
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return tenant
 
 
-@app.post("/companies/{company_id}/automations", response_model=Automation, dependencies=[Depends(require_api_key)])
-def create_automation(company_id: str, payload: AutomationCreate) -> Automation:
-    try:
-        return service.create_automation(company_id, payload)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+@app.put("/tenants/{tenant_id}", response_model=TenantOut)
+def update_tenant(tenant_id: str, payload: TenantUpdate, x_tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Tenant:
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    tenant.name = payload.name
+    tenant.network_name = payload.network_name
+    db.commit()
+    db.refresh(tenant)
+    return tenant
 
 
-@app.post("/companies/{company_id}/customers", response_model=Customer, dependencies=[Depends(require_api_key)])
-def create_customer(company_id: str, payload: CustomerCreate) -> Customer:
-    try:
-        return service.create_customer(company_id, payload)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+@app.delete("/tenants/{tenant_id}")
+def delete_tenant(tenant_id: str, x_tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> dict[str, str]:
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    db.delete(tenant)
+    db.commit()
+    return {"status": "deleted"}
 
 
-@app.post(
-    "/companies/{company_id}/customers/{customer_id}/status",
-    dependencies=[Depends(require_api_key)],
-)
-def update_customer_status(company_id: str, customer_id: str, payload: CustomerStatusChange) -> dict:
-    try:
-        return service.change_customer_status(company_id, customer_id, payload)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+# Customers CRUD scoped by X-Tenant-Id
+@app.post("/customers", response_model=CustomerOut)
+def create_customer(
+    payload: CustomerCreate,
+    tenant_id: str = Depends(require_tenant_id),
+    db: Session = Depends(get_db),
+) -> Customer:
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    customer = Customer(
+        id=str(uuid4()),
+        tenant_id=tenant_id,
+        name=payload.name,
+        email=payload.email,
+        plan_name=payload.plan_name,
+        status=payload.status,
+    )
+    db.add(customer)
+    db.commit()
+    db.refresh(customer)
+    return customer
 
 
-@app.get("/companies/{company_id}/dashboard", response_model=Dashboard, dependencies=[Depends(require_api_key)])
-def get_dashboard(company_id: str) -> Dashboard:
-    try:
-        return service.get_dashboard(company_id)
-    except KeyError as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
+@app.get("/customers", response_model=list[CustomerOut])
+def list_customers(
+    tenant_id: str = Depends(require_tenant_id),
+    db: Session = Depends(get_db),
+) -> list[Customer]:
+    return db.query(Customer).filter(Customer.tenant_id == tenant_id).order_by(Customer.name.asc()).all()
+
+
+@app.get("/customers/{customer_id}", response_model=CustomerOut)
+def get_customer(
+    customer_id: str,
+    tenant_id: str = Depends(require_tenant_id),
+    db: Session = Depends(get_db),
+) -> Customer:
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.tenant_id == tenant_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return customer
+
+
+@app.put("/customers/{customer_id}", response_model=CustomerOut)
+def update_customer(
+    customer_id: str,
+    payload: CustomerUpdate,
+    tenant_id: str = Depends(require_tenant_id),
+    db: Session = Depends(get_db),
+) -> Customer:
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.tenant_id == tenant_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    customer.name = payload.name
+    customer.email = payload.email
+    customer.plan_name = payload.plan_name
+    customer.status = payload.status
+    db.commit()
+    db.refresh(customer)
+    return customer
+
+
+@app.delete("/customers/{customer_id}")
+def delete_customer(
+    customer_id: str,
+    tenant_id: str = Depends(require_tenant_id),
+    db: Session = Depends(get_db),
+) -> dict[str, str]:
+    customer = db.query(Customer).filter(Customer.id == customer_id, Customer.tenant_id == tenant_id).first()
+    if not customer:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    db.delete(customer)
+    db.commit()
+    return {"status": "deleted"}
