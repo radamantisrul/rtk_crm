@@ -14,6 +14,25 @@ def test_web_home_available() -> None:
     assert "RTK CRM" in response.text
 
 
+def test_auth_login_and_me() -> None:
+    os.environ["RTK_ADMIN_USER"] = "admin"
+    os.environ["RTK_ADMIN_PASSWORD"] = "pass123"
+
+    wrong = client.post("/auth/login", json={"username": "admin", "password": "wrong"})
+    assert wrong.status_code == 401
+
+    login = client.post("/auth/login", json={"username": "admin", "password": "pass123"})
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+
+    me = client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.status_code == 200
+    assert me.json()["username"] == "admin"
+
+    os.environ.pop("RTK_ADMIN_USER", None)
+    os.environ.pop("RTK_ADMIN_PASSWORD", None)
+
+
 def test_company_hierarchy_and_listing() -> None:
     parent = client.post(
         "/companies",

@@ -64,3 +64,5 @@ th { color: #6b7280; font-weight: 600; font-size: .85rem; }
   .layout { grid-template-columns: 1fr; }
   .sidebar { position: sticky; top: 0; z-index: 10; }
 }
+
+.inline-error { color: #b91c1c; margin-top: 10px; }

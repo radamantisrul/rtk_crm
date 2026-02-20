@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { request } from './api'
+import { clearToken, getMe, getToken, login, request } from './api'
 
 const NAV_ITEMS = [
   { to: '/dashboard', label: 'Dashboard' },
@@ -108,10 +108,7 @@ function EmpresasPage({ companies, onCreateCompany }) {
     setForm({ name: '', network_name: '', parent_company_id: '' })
   }
 
-  const rows = companies.map((item) => ({
-    ...item,
-    status: item.parent_company_id ? 'reseller' : 'core',
-  }))
+  const rows = companies.map((item) => ({ ...item, status: item.parent_company_id ? 'reseller' : 'core' }))
 
   return (
     <div className="page-grid">
@@ -134,11 +131,7 @@ function EmpresasPage({ companies, onCreateCompany }) {
           { key: 'name', label: 'Nombre' },
           { key: 'id', label: 'ID' },
           { key: 'network_name', label: 'Red' },
-          {
-            key: 'status',
-            label: 'Tipo',
-            render: (value) => <Badge tone={value === 'core' ? 'success' : 'warning'}>{value}</Badge>,
-          },
+          { key: 'status', label: 'Tipo', render: (value) => <Badge tone={value === 'core' ? 'success' : 'warning'}>{value}</Badge> },
         ]}
       />
     </div>
@@ -162,9 +155,7 @@ function ClientesPage({ companies, onCreateCustomer }) {
           <select required value={form.company_id} onChange={(e) => setForm({ ...form, company_id: e.target.value })}>
             <option value="">Seleccionar empresa</option>
             {companies.map((company) => (
-              <option key={company.id} value={company.id}>
-                {company.name}
-              </option>
+              <option key={company.id} value={company.id}>{company.name}</option>
             ))}
           </select>
           <input required placeholder="Nombre cliente" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
@@ -172,11 +163,6 @@ function ClientesPage({ companies, onCreateCustomer }) {
           <input required placeholder="Plan (ej: 100Mbps)" value={form.plan_name} onChange={(e) => setForm({ ...form, plan_name: e.target.value })} />
           <button type="submit">Crear cliente</button>
         </form>
-      </section>
-
-      <section className="panel muted">
-        <h2>Tip UISP</h2>
-        <p>Después del alta, puedes usar el endpoint de cambio de estado para activar/suspender y disparar automatizaciones n8n.</p>
       </section>
     </div>
   )
@@ -194,24 +180,34 @@ function PlaceholderPage({ title, description, status = 'planned' }) {
   )
 }
 
-function LoginPage({ onLogin }) {
+function LoginPage({ onSubmit, loading, error }) {
+  const [credentials, setCredentials] = useState({ username: '', password: '' })
+
   return (
     <div className="login-screen">
       <section className="login-card">
         <h1>RTK CRM</h1>
-        <p>Sesión simulada (mock) para rutas protegidas.</p>
-        <button onClick={onLogin}>Entrar</button>
+        <p>Login admin inicial.</p>
+        <form
+          className="form-grid"
+          onSubmit={(event) => {
+            event.preventDefault()
+            onSubmit(credentials)
+          }}
+        >
+          <input placeholder="Usuario" required value={credentials.username} onChange={(e) => setCredentials({ ...credentials, username: e.target.value })} />
+          <input placeholder="Contraseña" type="password" required value={credentials.password} onChange={(e) => setCredentials({ ...credentials, password: e.target.value })} />
+          <button type="submit" disabled={loading}>{loading ? 'Ingresando...' : 'Entrar'}</button>
+        </form>
+        {error && <p className="inline-error">{error}</p>}
       </section>
     </div>
   )
 }
 
-function ProtectedLayout({ session, onLogout, apiStatus, children }) {
+function ProtectedLayout({ isAuthenticated, onLogout, apiStatus, children }) {
   const location = useLocation()
-
-  if (!session.loggedIn) {
-    return <Navigate to="/login" replace />
-  }
+  if (!isAuthenticated) return <Navigate to="/login" replace />
 
   return (
     <div className="layout">
@@ -222,24 +218,18 @@ function ProtectedLayout({ session, onLogout, apiStatus, children }) {
         </div>
         <nav>
           {NAV_ITEMS.map((item) => (
-            <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>
-              {item.label}
-            </NavLink>
+            <NavLink key={item.to} to={item.to} className={({ isActive }) => (isActive ? 'active' : '')}>{item.label}</NavLink>
           ))}
         </nav>
       </aside>
-
       <section className="main">
         <header className="topbar">
-          <div>
-            <strong>{NAV_ITEMS.find((item) => location.pathname.startsWith(item.to))?.label || 'Panel'}</strong>
-          </div>
+          <strong>{NAV_ITEMS.find((item) => location.pathname.startsWith(item.to))?.label || 'Panel'}</strong>
           <div className="actions-inline">
             <Badge tone={apiStatus === 'ok' ? 'success' : 'danger'}>{apiStatus === 'ok' ? 'API Online' : 'API Offline'}</Badge>
             <button className="ghost" onClick={onLogout}>Salir</button>
           </div>
         </header>
-
         <main className="content">{children}</main>
       </section>
     </div>
@@ -248,7 +238,9 @@ function ProtectedLayout({ session, onLogout, apiStatus, children }) {
 
 export default function App() {
   const navigate = useNavigate()
-  const [session, setSession] = useState({ loggedIn: false, user: 'ops@rtk.local' })
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [authLoading, setAuthLoading] = useState(false)
+  const [authError, setAuthError] = useState('')
   const [apiStatus, setApiStatus] = useState('loading')
   const [companies, setCompanies] = useState([])
   const [isLoadingCompanies, setIsLoadingCompanies] = useState(true)
@@ -260,6 +252,19 @@ export default function App() {
       setApiStatus(data.status)
     } catch {
       setApiStatus('down')
+    }
+  }
+
+  async function validateSession() {
+    const token = getToken()
+    if (!token) return
+    try {
+      await getMe()
+      setIsAuthenticated(true)
+      navigate('/dashboard')
+    } catch {
+      clearToken()
+      setIsAuthenticated(false)
     }
   }
 
@@ -278,13 +283,33 @@ export default function App() {
 
   useEffect(() => {
     loadHealth()
+    validateSession()
   }, [])
 
   useEffect(() => {
-    if (session.loggedIn) {
-      loadCompanies()
+    if (isAuthenticated) loadCompanies()
+  }, [isAuthenticated])
+
+  async function handleLogin(credentials) {
+    setAuthLoading(true)
+    setAuthError('')
+    try {
+      await login(credentials.username, credentials.password)
+      await getMe()
+      setIsAuthenticated(true)
+      navigate('/dashboard')
+    } catch (err) {
+      setAuthError(err.message)
+    } finally {
+      setAuthLoading(false)
     }
-  }, [session.loggedIn])
+  }
+
+  function logout() {
+    clearToken()
+    setIsAuthenticated(false)
+    navigate('/login')
+  }
 
   async function createCompany(payload) {
     setError('')
@@ -308,48 +333,25 @@ export default function App() {
     }
   }
 
-  function login() {
-    setSession((prev) => ({ ...prev, loggedIn: true }))
-    navigate('/dashboard')
-  }
-
-  function logout() {
-    setSession((prev) => ({ ...prev, loggedIn: false }))
-    navigate('/login')
-  }
-
   return (
     <>
       {error && <div className="global-error">{error}</div>}
       <Routes>
-        <Route path="/login" element={<LoginPage onLogin={login} />} />
-
+        <Route path="/login" element={<LoginPage onSubmit={handleLogin} loading={authLoading} error={authError} />} />
         <Route
           path="/*"
           element={(
-            <ProtectedLayout session={session} onLogout={logout} apiStatus={apiStatus}>
+            <ProtectedLayout isAuthenticated={isAuthenticated} onLogout={logout} apiStatus={apiStatus}>
               {isLoadingCompanies && <p className="loading">Cargando datos...</p>}
               <Routes>
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
                 <Route path="/dashboard" element={<DashboardPage apiStatus={apiStatus} companiesCount={companies.length} />} />
                 <Route path="/empresas" element={<EmpresasPage companies={companies} onCreateCompany={createCompany} />} />
                 <Route path="/clientes" element={<ClientesPage companies={companies} onCreateCustomer={createCustomer} />} />
-                <Route
-                  path="/integraciones"
-                  element={<PlaceholderPage title="Integraciones" description="Conexiones por empresa: UISP, OpenAI, n8n y Google." status="active" />}
-                />
-                <Route
-                  path="/monitoreo"
-                  element={<PlaceholderPage title="Monitoreo" description="Vista para salud operativa, métricas de red y alertas de clientes." />}
-                />
-                <Route
-                  path="/comunicaciones"
-                  element={<PlaceholderPage title="Comunicaciones" description="Consola tipo inbox para flujos omnicanal y campañas automáticas." />}
-                />
-                <Route
-                  path="/configuracion"
-                  element={<PlaceholderPage title="Configuración" description="Parámetros globales por tenant, claves API y reglas de automatización." />}
-                />
+                <Route path="/integraciones" element={<PlaceholderPage title="Integraciones" description="Conexiones por empresa: UISP, OpenAI, n8n y Google." status="active" />} />
+                <Route path="/monitoreo" element={<PlaceholderPage title="Monitoreo" description="Vista para métricas y alertas operativas." />} />
+                <Route path="/comunicaciones" element={<PlaceholderPage title="Comunicaciones" description="Consola tipo inbox omnicanal." />} />
+                <Route path="/configuracion" element={<PlaceholderPage title="Configuración" description="Parámetros generales y claves API." />} />
               </Routes>
             </ProtectedLayout>
           )}
