@@ -1,3 +1,5 @@
+import os
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -107,3 +109,14 @@ def test_dashboard_counts() -> None:
     assert info["total_customers"] == 1
     assert info["suspended_customers"] == 1
     assert "openai" in info["integrations"]
+
+
+def test_api_key_protection() -> None:
+    os.environ["RTK_API_KEY"] = "secret"
+    unauthorized = client.get("/companies")
+    assert unauthorized.status_code == 401
+
+    authorized = client.get("/companies", headers={"x-api-key": "secret"})
+    assert authorized.status_code == 200
+
+    os.environ.pop("RTK_API_KEY", None)
