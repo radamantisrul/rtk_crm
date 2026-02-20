@@ -21,6 +21,13 @@ from app.services import CRMService
 
 app = FastAPI(title="RTK CRM API", version="0.3.0")
 service = CRMService()
+@app.get("/")
+def root():
+    return {"name": "rtk_crm", "status": "ok"}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
