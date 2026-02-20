@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -44,3 +46,21 @@ class CustomerOut(BaseModel):
     status: str
 
     model_config = {"from_attributes": True}
+
+
+class IntegrationCreate(BaseModel):
+    provider: str
+    config: dict[str, Any]
+
+
+class IntegrationOut(BaseModel):
+    id: str
+    tenant_id: str
+    provider: str
+    config_keys: list[str]
+
+
+class IntegrationTestResult(BaseModel):
+    ok: bool
+    status_code: int | None = None
+    detail: str

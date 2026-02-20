@@ -14,7 +14,7 @@ export function clearToken() {
   localStorage.removeItem(TOKEN_KEY)
 }
 
-function currentTenantHeader() {
+function bootstrapTenantHeader() {
   return localStorage.getItem('rtk_tenant_id') || 'bootstrap'
 }
 
@@ -57,11 +57,15 @@ export async function getMe() {
 }
 
 export async function listTenants() {
-  return request('/tenants', { headers: { 'X-Tenant-Id': currentTenantHeader() } })
+  return request('/tenants', { headers: { 'X-Tenant-Id': bootstrapTenantHeader() } })
 }
 
 export async function createTenant(payload) {
-  return request('/tenants', { method: 'POST', headers: { 'X-Tenant-Id': currentTenantHeader() }, body: JSON.stringify(payload) })
+  return request('/tenants', {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': bootstrapTenantHeader() },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function listCustomersByTenant(tenantId) {
@@ -73,5 +77,24 @@ export async function createCustomerForTenant(tenantId, payload) {
     method: 'POST',
     headers: { 'X-Tenant-Id': tenantId },
     body: JSON.stringify(payload),
+  })
+}
+
+export async function listIntegrations(tenantId) {
+  return request('/integrations', { headers: { 'X-Tenant-Id': tenantId } })
+}
+
+export async function saveIntegration(tenantId, provider, config) {
+  return request('/integrations', {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': tenantId },
+    body: JSON.stringify({ provider, config }),
+  })
+}
+
+export async function testIntegration(tenantId, integrationId) {
+  return request(`/integrations/${integrationId}/test`, {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': tenantId },
   })
 }

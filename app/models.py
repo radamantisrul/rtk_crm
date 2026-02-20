@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, String, func
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 
 from app.db import Base
@@ -13,6 +13,7 @@ class Tenant(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     customers = relationship("Customer", back_populates="tenant", cascade="all, delete-orphan")
+    integrations = relationship("Integration", back_populates="tenant", cascade="all, delete-orphan")
 
 
 class Customer(Base):
@@ -27,3 +28,16 @@ class Customer(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     tenant = relationship("Tenant", back_populates="customers")
+
+
+class Integration(Base):
+    __tablename__ = "integrations"
+    __table_args__ = (UniqueConstraint("tenant_id", "provider", name="uq_integration_tenant_provider"),)
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String, nullable=False)
+    config_encrypted = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    tenant = relationship("Tenant", back_populates="integrations")

@@ -6,6 +6,8 @@ import os
 import time
 from uuid import uuid4
 
+import httpx
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -14,10 +16,20 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.db import Base, SessionLocal, engine
-from app.models import Customer, Tenant
-from app.schemas import CustomerCreate, CustomerOut, CustomerUpdate, TenantCreate, TenantOut, TenantUpdate
+from app.models import Customer, Integration, Tenant
+from app.schemas import (
+    CustomerCreate,
+    CustomerOut,
+    CustomerUpdate,
+    IntegrationCreate,
+    IntegrationOut,
+    IntegrationTestResult,
+    TenantCreate,
+    TenantOut,
+    TenantUpdate,
+)
 
-app = FastAPI(title="RTK CRM API", version="0.5.0")
+app = FastAPI(title="RTK CRM API", version="0.6.0")
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -44,6 +56,35 @@ def _token_secret() -> str:
 
 def _token_ttl_seconds() -> int:
     return int(os.getenv("RTK_AUTH_TTL_SECONDS", "43200"))
+
+
+def _kms_key() -> bytes:
+    raw = os.getenv("INTEGRATIONS_KMS_KEY")
+    if not raw:
+        raise HTTPException(status_code=500, detail="INTEGRATIONS_KMS_KEY not configured")
+    try:
+        key = base64.b64decode(raw)
+    except Exception:
+        key = raw.encode()
+    if len(key) != 32:
+        raise HTTPException(status_code=500, detail="INTEGRATIONS_KMS_KEY must be 32 bytes (base64)")
+    return key
+
+
+def _encrypt_config(config: dict) -> str:
+    aesgcm = AESGCM(_kms_key())
+    nonce = os.urandom(12)
+    plaintext = json.dumps(config, separators=(",", ":"), sort_keys=True).encode()
+    ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+    return base64.b64encode(nonce + ciphertext).decode()
+
+
+def _decrypt_config(value: str) -> dict:
+    raw = base64.b64decode(value)
+    nonce, ciphertext = raw[:12], raw[12:]
+    aesgcm = AESGCM(_kms_key())
+    plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+    return json.loads(plaintext.decode())
 
 
 def _sign_token(payload: dict) -> str:
@@ -107,15 +148,9 @@ def health() -> dict[str, str]:
 def auth_login(payload: LoginPayload) -> LoginResponse:
     admin_user = os.getenv("RTK_ADMIN_USER", "admin")
     admin_password = os.getenv("RTK_ADMIN_PASSWORD", "admin123")
-
     if payload.username != admin_user or payload.password != admin_password:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    token_payload = {
-        "sub": payload.username,
-        "role": "admin",
-        "exp": int(time.time()) + _token_ttl_seconds(),
-    }
+    token_payload = {"sub": payload.username, "role": "admin", "exp": int(time.time()) + _token_ttl_seconds()}
     return LoginResponse(access_token=_sign_token(token_payload))
 
 
@@ -129,7 +164,6 @@ def auth_me(authorization: str | None = Header(default=None)) -> AuthMeResponse:
     return AuthMeResponse(username=username)
 
 
-# Tenants CRUD
 @app.post("/tenants", response_model=TenantOut)
 def create_tenant(payload: TenantCreate, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Tenant:
     tenant = Tenant(id=str(uuid4()), name=payload.name, network_name=payload.network_name)
@@ -174,24 +208,12 @@ def delete_tenant(tenant_id: str, x_tenant_id: str = Depends(require_tenant_id),
     return {"status": "deleted"}
 
 
-# Customers CRUD scoped by X-Tenant-Id
 @app.post("/customers", response_model=CustomerOut)
-def create_customer(
-    payload: CustomerCreate,
-    tenant_id: str = Depends(require_tenant_id),
-    db: Session = Depends(get_db),
-) -> Customer:
+def create_customer(payload: CustomerCreate, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Customer:
     tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
-    customer = Customer(
-        id=str(uuid4()),
-        tenant_id=tenant_id,
-        name=payload.name,
-        email=payload.email,
-        plan_name=payload.plan_name,
-        status=payload.status,
-    )
+    customer = Customer(id=str(uuid4()), tenant_id=tenant_id, name=payload.name, email=payload.email, plan_name=payload.plan_name, status=payload.status)
     db.add(customer)
     db.commit()
     db.refresh(customer)
@@ -199,19 +221,12 @@ def create_customer(
 
 
 @app.get("/customers", response_model=list[CustomerOut])
-def list_customers(
-    tenant_id: str = Depends(require_tenant_id),
-    db: Session = Depends(get_db),
-) -> list[Customer]:
+def list_customers(tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> list[Customer]:
     return db.query(Customer).filter(Customer.tenant_id == tenant_id).order_by(Customer.name.asc()).all()
 
 
 @app.get("/customers/{customer_id}", response_model=CustomerOut)
-def get_customer(
-    customer_id: str,
-    tenant_id: str = Depends(require_tenant_id),
-    db: Session = Depends(get_db),
-) -> Customer:
+def get_customer(customer_id: str, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Customer:
     customer = db.query(Customer).filter(Customer.id == customer_id, Customer.tenant_id == tenant_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
@@ -219,16 +234,10 @@ def get_customer(
 
 
 @app.put("/customers/{customer_id}", response_model=CustomerOut)
-def update_customer(
-    customer_id: str,
-    payload: CustomerUpdate,
-    tenant_id: str = Depends(require_tenant_id),
-    db: Session = Depends(get_db),
-) -> Customer:
+def update_customer(customer_id: str, payload: CustomerUpdate, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> Customer:
     customer = db.query(Customer).filter(Customer.id == customer_id, Customer.tenant_id == tenant_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
-
     customer.name = payload.name
     customer.email = payload.email
     customer.plan_name = payload.plan_name
@@ -239,14 +248,62 @@ def update_customer(
 
 
 @app.delete("/customers/{customer_id}")
-def delete_customer(
-    customer_id: str,
-    tenant_id: str = Depends(require_tenant_id),
-    db: Session = Depends(get_db),
-) -> dict[str, str]:
+def delete_customer(customer_id: str, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> dict[str, str]:
     customer = db.query(Customer).filter(Customer.id == customer_id, Customer.tenant_id == tenant_id).first()
     if not customer:
         raise HTTPException(status_code=404, detail="Customer not found")
     db.delete(customer)
     db.commit()
     return {"status": "deleted"}
+
+
+@app.post("/integrations", response_model=IntegrationOut)
+def upsert_integration(payload: IntegrationCreate, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> IntegrationOut:
+    if payload.provider.lower() not in {"uisp", "chatwoot", "n8n"}:
+        raise HTTPException(status_code=400, detail="Unsupported provider")
+
+    row = db.query(Integration).filter(Integration.tenant_id == tenant_id, Integration.provider == payload.provider.lower()).first()
+    encrypted = _encrypt_config(payload.config)
+
+    if row:
+        row.config_encrypted = encrypted
+    else:
+        row = Integration(id=str(uuid4()), tenant_id=tenant_id, provider=payload.provider.lower(), config_encrypted=encrypted)
+        db.add(row)
+
+    db.commit()
+    db.refresh(row)
+    return IntegrationOut(id=row.id, tenant_id=row.tenant_id, provider=row.provider, config_keys=sorted(list(payload.config.keys())))
+
+
+@app.get("/integrations", response_model=list[IntegrationOut])
+def list_integrations(tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> list[IntegrationOut]:
+    rows = db.query(Integration).filter(Integration.tenant_id == tenant_id).order_by(Integration.provider.asc()).all()
+    result: list[IntegrationOut] = []
+    for row in rows:
+        config = _decrypt_config(row.config_encrypted)
+        result.append(IntegrationOut(id=row.id, tenant_id=row.tenant_id, provider=row.provider, config_keys=sorted(list(config.keys()))))
+    return result
+
+
+@app.post("/integrations/{integration_id}/test", response_model=IntegrationTestResult)
+def test_integration_connection(integration_id: str, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> IntegrationTestResult:
+    row = db.query(Integration).filter(Integration.id == integration_id, Integration.tenant_id == tenant_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Integration not found")
+
+    config = _decrypt_config(row.config_encrypted)
+    target_url = config.get("base_url") or config.get("url")
+    if not target_url:
+        raise HTTPException(status_code=400, detail="Integration config must include base_url or url")
+
+    headers = {}
+    if config.get("api_key"):
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+
+    try:
+        response = httpx.get(target_url, timeout=5.0, headers=headers)
+        ok = response.status_code < 400
+        return IntegrationTestResult(ok=ok, status_code=response.status_code, detail="ok" if ok else "connection failed")
+    except Exception as error:
+        return IntegrationTestResult(ok=False, status_code=None, detail=str(error))

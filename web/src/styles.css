@@ -66,3 +66,5 @@ th { color: #6b7280; font-weight: 600; font-size: .85rem; }
 }
 
 .inline-error { color: #b91c1c; margin-top: 10px; }
+
+.provider-grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
