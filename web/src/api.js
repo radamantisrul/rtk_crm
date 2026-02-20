@@ -93,8 +93,28 @@ export async function saveIntegration(tenantId, provider, config) {
 }
 
 export async function testIntegration(tenantId, integrationId) {
-  return request(`/integrations/${integrationId}/test`, {
+  return request(`/integrations/${integrationId}/connection-test`, {
     method: 'POST',
+    headers: { 'X-Tenant-Id': tenantId },
+  })
+}
+
+export async function testUisp(tenantId) {
+  return request('/integrations/uisp/test', {
+    method: 'POST',
+    headers: { 'X-Tenant-Id': tenantId },
+  })
+}
+
+export async function searchUispCustomers(tenantId, query) {
+  const params = new URLSearchParams({ query })
+  return request(`/integrations/uisp/search?${params.toString()}`, {
+    headers: { 'X-Tenant-Id': tenantId },
+  })
+}
+
+export async function getUispCustomerServices(tenantId, customerId) {
+  return request(`/integrations/uisp/customer/${customerId}/services`, {
     headers: { 'X-Tenant-Id': tenantId },
   })
 }

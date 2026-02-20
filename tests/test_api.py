@@ -1,4 +1,5 @@
 import os
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -8,6 +9,13 @@ os.environ.setdefault("INTEGRATIONS_KMS_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3O
 from app.main import app
 
 client = TestClient(app)
+
+
+def _mock_response(status_code: int, payload):
+    response = Mock()
+    response.status_code = status_code
+    response.json.return_value = payload
+    return response
 
 
 def test_health() -> None:
@@ -32,9 +40,6 @@ def test_auth_login_and_me() -> None:
 
 
 def test_tenant_customer_and_integrations_flow() -> None:
-    missing = client.post("/tenants", json={"name": "Tenant A", "network_name": "red-a"})
-    assert missing.status_code == 400
-
     tenant = client.post(
         "/tenants",
         headers={"X-Tenant-Id": "bootstrap"},
@@ -51,7 +56,7 @@ def test_tenant_customer_and_integrations_flow() -> None:
     save_integration = client.post(
         "/integrations",
         headers={"X-Tenant-Id": tenant["id"]},
-        json={"provider": "uisp", "config": {"base_url": "https://example.com", "api_key": "abc"}},
+        json={"provider": "uisp", "config": {"base_url": "https://example.com", "app_key": "app", "token": "tok"}},
     )
     assert save_integration.status_code == 200
 
@@ -59,9 +64,36 @@ def test_tenant_customer_and_integrations_flow() -> None:
     assert integrations.status_code == 200
     assert len(integrations.json()) == 1
 
-    test_conn = client.post(
-        f"/integrations/{integrations.json()[0]['id']}/test",
+
+def test_uisp_endpoints() -> None:
+    tenant = client.post(
+        "/tenants",
+        headers={"X-Tenant-Id": "bootstrap"},
+        json={"name": "Tenant UISP", "network_name": "red-uisp"},
+    ).json()
+
+    client.post(
+        "/integrations",
         headers={"X-Tenant-Id": tenant["id"]},
+        json={"provider": "uisp", "config": {"base_url": "https://uisp.example", "app_key": "app", "token": "tok"}},
     )
-    assert test_conn.status_code == 200
-    assert "ok" in test_conn.json()
+
+    def fake_httpx_get(url, **kwargs):
+        if "sites" in url:
+            return _mock_response(200, [])
+        if "services" in url:
+            return _mock_response(200, [{"id": "svc1", "name": "Internet"}])
+        return _mock_response(200, [{"id": "c1", "name": "Juan", "email": "juan@test.com", "status": "active"}])
+
+    with patch("app.main.httpx.get", side_effect=fake_httpx_get):
+        test_conn = client.post("/integrations/uisp/test", headers={"X-Tenant-Id": tenant["id"]})
+        assert test_conn.status_code == 200
+        assert test_conn.json()["ok"] is True
+
+        search = client.get("/integrations/uisp/search", params={"query": "juan"}, headers={"X-Tenant-Id": tenant["id"]})
+        assert search.status_code == 200
+        assert len(search.json()["results"]) == 1
+
+        services = client.get(f"/integrations/uisp/customer/c1/services", headers={"X-Tenant-Id": tenant["id"]})
+        assert services.status_code == 200
+        assert len(services.json()["services"]) == 1

@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,7 +29,7 @@ from app.schemas import (
     TenantUpdate,
 )
 
-app = FastAPI(title="RTK CRM API", version="0.6.0")
+app = FastAPI(title="RTK CRM API", version="0.7.0")
 
 templates = Jinja2Templates(directory="app/templates")
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
@@ -132,6 +132,28 @@ def require_tenant_id(x_tenant_id: str | None = Header(default=None)) -> str:
     if not x_tenant_id:
         raise HTTPException(status_code=400, detail="X-Tenant-Id header required")
     return x_tenant_id
+
+
+def _get_tenant_integration(db: Session, tenant_id: str, provider: str) -> Integration:
+    row = db.query(Integration).filter(Integration.tenant_id == tenant_id, Integration.provider == provider).first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"{provider} integration not configured")
+    return row
+
+
+def _uisp_headers(config: dict) -> dict:
+    headers = {"accept": "application/json"}
+    if config.get("token"):
+        headers["Authorization"] = f"Bearer {config['token']}"
+    if config.get("app_key"):
+        headers["X-App-Key"] = config["app_key"]
+    if config.get("api_key") and "Authorization" not in headers:
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+    return headers
+
+
+def _normalize_url(base_url: str, path: str) -> str:
+    return f"{base_url.rstrip('/')}/{path.lstrip('/')}"
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -259,16 +281,17 @@ def delete_customer(customer_id: str, tenant_id: str = Depends(require_tenant_id
 
 @app.post("/integrations", response_model=IntegrationOut)
 def upsert_integration(payload: IntegrationCreate, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> IntegrationOut:
-    if payload.provider.lower() not in {"uisp", "chatwoot", "n8n"}:
+    provider = payload.provider.lower()
+    if provider not in {"uisp", "chatwoot", "n8n"}:
         raise HTTPException(status_code=400, detail="Unsupported provider")
 
-    row = db.query(Integration).filter(Integration.tenant_id == tenant_id, Integration.provider == payload.provider.lower()).first()
+    row = db.query(Integration).filter(Integration.tenant_id == tenant_id, Integration.provider == provider).first()
     encrypted = _encrypt_config(payload.config)
 
     if row:
         row.config_encrypted = encrypted
     else:
-        row = Integration(id=str(uuid4()), tenant_id=tenant_id, provider=payload.provider.lower(), config_encrypted=encrypted)
+        row = Integration(id=str(uuid4()), tenant_id=tenant_id, provider=provider, config_encrypted=encrypted)
         db.add(row)
 
     db.commit()
@@ -286,7 +309,7 @@ def list_integrations(tenant_id: str = Depends(require_tenant_id), db: Session =
     return result
 
 
-@app.post("/integrations/{integration_id}/test", response_model=IntegrationTestResult)
+@app.post("/integrations/{integration_id}/connection-test", response_model=IntegrationTestResult)
 def test_integration_connection(integration_id: str, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> IntegrationTestResult:
     row = db.query(Integration).filter(Integration.id == integration_id, Integration.tenant_id == tenant_id).first()
     if not row:
@@ -307,3 +330,93 @@ def test_integration_connection(integration_id: str, tenant_id: str = Depends(re
         return IntegrationTestResult(ok=ok, status_code=response.status_code, detail="ok" if ok else "connection failed")
     except Exception as error:
         return IntegrationTestResult(ok=False, status_code=None, detail=str(error))
+
+
+@app.post("/integrations/uisp/test", response_model=IntegrationTestResult)
+def test_uisp(tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> IntegrationTestResult:
+    row = _get_tenant_integration(db, tenant_id, "uisp")
+    config = _decrypt_config(row.config_encrypted)
+    base_url = config.get("base_url")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="UISP base_url missing")
+
+    try:
+        response = httpx.get(_normalize_url(base_url, "/nms/api/v2.1/sites"), params={"limit": 1}, headers=_uisp_headers(config), timeout=6.0)
+        ok = response.status_code < 400
+        return IntegrationTestResult(ok=ok, status_code=response.status_code, detail="ok" if ok else "uisp connection failed")
+    except Exception as error:
+        return IntegrationTestResult(ok=False, status_code=None, detail=str(error))
+
+
+@app.get("/integrations/uisp/search")
+def uisp_search(query: str = Query(min_length=1), tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> dict:
+    row = _get_tenant_integration(db, tenant_id, "uisp")
+    config = _decrypt_config(row.config_encrypted)
+    base_url = config.get("base_url")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="UISP base_url missing")
+
+    urls = [
+        _normalize_url(base_url, "/crm/api/v1.0/clients"),
+        _normalize_url(base_url, "/nms/api/v2.1/clients"),
+    ]
+
+    last_error = None
+    for url in urls:
+        try:
+            response = httpx.get(url, params={"query": query, "limit": 25}, headers=_uisp_headers(config), timeout=8.0)
+            if response.status_code >= 400:
+                last_error = f"{url} -> {response.status_code}"
+                continue
+            data = response.json()
+            if isinstance(data, dict):
+                items = data.get("items", data.get("results", []))
+            else:
+                items = data
+            normalized = []
+            for item in items:
+                normalized.append(
+                    {
+                        "id": item.get("id") or item.get("clientId") or item.get("uuid"),
+                        "name": item.get("name") or item.get("fullName") or "(sin nombre)",
+                        "email": item.get("email") or item.get("contactEmail"),
+                        "status": item.get("status") or "unknown",
+                    }
+                )
+            return {"results": normalized}
+        except Exception as error:
+            last_error = str(error)
+
+    raise HTTPException(status_code=502, detail=f"UISP search failed: {last_error}")
+
+
+@app.get("/integrations/uisp/customer/{customer_id}/services")
+def uisp_customer_services(customer_id: str, tenant_id: str = Depends(require_tenant_id), db: Session = Depends(get_db)) -> dict:
+    row = _get_tenant_integration(db, tenant_id, "uisp")
+    config = _decrypt_config(row.config_encrypted)
+    base_url = config.get("base_url")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="UISP base_url missing")
+
+    urls = [
+        _normalize_url(base_url, f"/crm/api/v1.0/clients/{customer_id}/services"),
+        _normalize_url(base_url, f"/nms/api/v2.1/clients/{customer_id}/services"),
+    ]
+
+    last_error = None
+    for url in urls:
+        try:
+            response = httpx.get(url, headers=_uisp_headers(config), timeout=8.0)
+            if response.status_code >= 400:
+                last_error = f"{url} -> {response.status_code}"
+                continue
+            data = response.json()
+            if isinstance(data, dict):
+                items = data.get("items", data.get("results", []))
+            else:
+                items = data
+            return {"customer_id": customer_id, "services": items}
+        except Exception as error:
+            last_error = str(error)
+
+    raise HTTPException(status_code=502, detail=f"UISP services failed: {last_error}")
